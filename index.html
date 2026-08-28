@@ -92,7 +92,7 @@ input,select{width:100%;padding:14px 12px;border-radius:14px;border:1px solid #2
 <body>
 <header class="wrap">
   <div class="app-title">MFAM Bills</div>
-  <div class="sub">Pay-period bill planner • Version 18</div>
+  <div class="sub">Pay-period bill planner • Version 19</div>
 </header>
 <div class="wrap">
   <div class="topbar">
@@ -267,7 +267,7 @@ input,select{width:100%;padding:14px 12px;border-radius:14px;border:1px solid #2
 const STORAGE_KEY_BILLS = 'mfam_bills_v9';
 const STORAGE_KEY_PAYMENTS = 'mfam_payments_v9';
 const STORAGE_KEY_SETTINGS = 'mfam_settings_v1';
-const STORAGE_KEY_ADVANCE = 'mfam_advance_v1';
+const STORAGE_KEY_ADVANCE = 'mfam_bill_next_payday_v2';
 const LEGACY_BILL_KEYS = ['mfam_bills_v8','mfam_bills_v7','mfam_bills_v6','mfam_bills_v5','mfam_bills_v2','mfam_bills'];
 const LEGACY_PAYMENT_KEYS = ['mfam_payments_v8','mfam_payments_v7','mfam_payments_v6','mfam_payments_v5','mfam_payments_v2','mfam_payments'];
 let editingBillId = null;
@@ -275,7 +275,14 @@ let advancedBills = loadJSON(STORAGE_KEY_ADVANCE, {});
 function saveAdvance(){ localStorage.setItem(STORAGE_KEY_ADVANCE, JSON.stringify(advancedBills)); }
 function billAdvanceKey(billId, period){ return `${billId}|${toYMD(period.start)}`; }
 function isAdvancedToNextPeriod(billId, period){ return !!advancedBills[billAdvanceKey(billId, period)]; }
-function toggleAdvanceBill(billId){ const period=getCurrentPayPeriod(); const key=billAdvanceKey(billId, period); if(advancedBills[key]) delete advancedBills[key]; else advancedBills[key]=true; saveAdvance(); renderAll(); }
+function toggleAdvanceBill(billId){
+  const period = getCurrentPayPeriod();
+  const key = billAdvanceKey(billId, period);
+  if(advancedBills[key]) delete advancedBills[key];
+  else advancedBills[key] = { advancedAt:new Date().toISOString() };
+  saveAdvance();
+  renderAll();
+}
 
 function uid(prefix='id'){ return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
 function money(n){ return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n||0)); }
@@ -319,6 +326,7 @@ function normalizePayment(p){
     source: p.source || 'USAA Bills',
     paidAt,
     date: new Date(paidAt).toLocaleDateString(),
+    targetPeriodStart: p.targetPeriodStart || null,
     splitMeta: normalizeSplitMeta(p.splitMeta)
   };
 }
@@ -326,8 +334,16 @@ function loadJSON(key, fallback){ try{ return JSON.parse(localStorage.getItem(ke
 migrateStorage();
 let bills = (loadJSON(STORAGE_KEY_BILLS, []) || []).map(normalizeBill);
 let payments = (loadJSON(STORAGE_KEY_PAYMENTS, []) || []).map(normalizePayment);
-const defaultSettings = { paycheckAmount:2506, nextPayday:'2026-03-14', monthlyDepositAmount:4550, monthlyDepositDay:1 };
+const defaultSettings = { paycheckAmount:2506, nextPayday:'2026-08-29', monthlyDepositAmount:4550, monthlyDepositDay:1 };
 let settings = {...defaultSettings, ...(loadJSON(STORAGE_KEY_SETTINGS, {}) || {})};
+const PAYDAY_RESET_KEY = 'mfam_v19_payday_reset_20260829';
+if(!localStorage.getItem(PAYDAY_RESET_KEY)){
+  settings.nextPayday = '2026-08-29';
+  advancedBills = {};
+  localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+  saveAdvance();
+  localStorage.setItem(PAYDAY_RESET_KEY, '1');
+}
 
 function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); saveAdvance(); }
 function syncSettingsForm(){ document.getElementById('paycheckAmount').value = settings.paycheckAmount ?? ''; document.getElementById('nextPayday').value = settings.nextPayday ?? ''; document.getElementById('monthlyDepositAmount').value = settings.monthlyDepositAmount ?? ''; document.getElementById('monthlyDepositDay').value = settings.monthlyDepositDay ?? ''; }
@@ -359,9 +375,13 @@ function getAnchorPayday(){ const d = parseDateOnly(settings.nextPayday || defau
 function getCurrentPayPeriod(){ const today = new Date(); today.setHours(0,0,0,0); let start = getAnchorPayday(); if(today >= start){ const diffDays = Math.floor((today - start)/(1000*60*60*24)); const periods = Math.floor(diffDays / 14); start = new Date(start); start.setDate(start.getDate() + periods*14); } const end = new Date(start); end.setDate(end.getDate()+13); end.setHours(23,59,59,999); return {start,end}; }
 function getPeriodForOffset(offset=0){ const current = getCurrentPayPeriod(); const start = new Date(current.start); start.setDate(start.getDate() + offset*14); const end = new Date(start); end.setDate(start.getDate()+13); end.setHours(23,59,59,999); return {start,end}; }
 function dueDateForMonth(year, month, day){ const last = new Date(year, month+1, 0).getDate(); const d = new Date(year, month, Math.min(day,last)); d.setHours(0,0,0,0); return d; }
-function paymentInPeriodForBill(billId, period){ return payments.some(p => p.billId === billId && isDateInPeriod(new Date(p.paidAt), period)); }
-function paymentForBillInPeriod(billId, period){ return payments.filter(p => p.billId === billId && isDateInPeriod(new Date(p.paidAt), period)).sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt))[0] || null; }
 function isDateInPeriod(date, period){ const d = new Date(date); return d >= period.start && d <= period.end; }
+function paymentBelongsToPeriod(p, period){
+  if(p.targetPeriodStart) return p.targetPeriodStart === toYMD(period.start);
+  return isDateInPeriod(new Date(p.paidAt), period);
+}
+function paymentInPeriodForBill(billId, period){ return payments.some(p => p.billId === billId && paymentBelongsToPeriod(p, period)); }
+function paymentForBillInPeriod(billId, period){ return payments.filter(p => p.billId === billId && paymentBelongsToPeriod(p, period)).sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt))[0] || null; }
 function nextDueDateOnOrAfter(bill, referenceDate){
   const ref = new Date(referenceDate);
   ref.setHours(0,0,0,0);
@@ -418,24 +438,29 @@ function splitHistorySummary(bill){
   return {count:splitPayments.length, cycleCount:uniqueCycles.size, text:`${splitPayments.length} installments logged across ${uniqueCycles.size} due cycle${uniqueCycles.size===1?'':'s'} • ${latestText}`};
 }
 function billsForPeriod(period){
-  const current = getCurrentPayPeriod();
-  const isCurrent = toYMD(period.start)===toYMD(current.start);
-  const isNext = toYMD(period.start)===toYMD(getPeriodForOffset(1).start);
   return bills.filter(b=>!b.paidOff).map(b=>{
-    let allocated = amountDueThisCycle(b, period);
-    const advancedNow = isCurrent && isAdvancedToNextPeriod(b.id, current);
-    const advancedIntoThis = isNext && isAdvancedToNextPeriod(b.id, current);
-    if(advancedNow) return null;
-    if(advancedIntoThis && allocated<=0){
-      allocated = amountDueThisCycle(b, current);
-      if(allocated<=0) return null;
-      const paidThisCycle = paymentInPeriodForBill(b.id, period);
-      return {...b, allocated, paidThisCycle, due: displayDueDate(b, current), advancedFromPrior:true};
-    }
+    const allocated = amountDueThisCycle(b, period);
     if(allocated <= 0) return null;
     const paidThisCycle = paymentInPeriodForBill(b.id, period);
-    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period), advancedFromPrior:advancedIntoThis};
+    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period)};
   }).filter(Boolean).sort((a,b)=>a.due-b.due || a.name.localeCompare(b.name));
+}
+function billDisplayForDashboard(bill, currentPeriod){
+  if(!isAdvancedToNextPeriod(bill.id, currentPeriod)){
+    return {...bill, targetPeriodStart:toYMD(currentPeriod.start), advancedToNext:false, payday:currentPeriod.start};
+  }
+  const next = getPeriodForOffset(1);
+  let allocated = amountDueThisCycle(bill, next);
+  if(allocated <= 0) allocated = bill.split ? bill.amount/2 : bill.amount;
+  return {
+    ...bill,
+    allocated,
+    due:displayDueDate(bill, next),
+    paidThisCycle:paymentInPeriodForBill(bill.id, next),
+    targetPeriodStart:toYMD(next.start),
+    advancedToNext:true,
+    payday:next.start
+  };
 }
 function incomeForPeriod(period){
   let total = Number(settings.paycheckAmount || 0);
@@ -453,17 +478,25 @@ function incomeForPeriod(period){
   });
   return total;
 }
-function logPayment(billId, suggestedAmount){
+function logPayment(billId, suggestedAmount, targetPeriodStart=null){
   const bill = bills.find(b=>b.id===billId); if(!bill) return;
   if(bill.paidOff) return alert('This bill is marked paid off. Set it back to Active first if you need to log a payment.');
   const defaultAmt = Number(suggestedAmount ?? (bill.split ? bill.amount/2 : bill.amount));
-  const promptMsg = `Log payment for ${bill.name}\nSuggested amount: ${defaultAmt.toFixed(2)}\nSource: ${bill.source}`;
+  const targetNote = targetPeriodStart ? `\nPayday cycle: ${parseDateOnly(targetPeriodStart).toLocaleDateString()}` : '';
+  const promptMsg = `Log payment for ${bill.name}\nSuggested amount: ${defaultAmt.toFixed(2)}\nSource: ${bill.source}${targetNote}`;
   if(!confirm(promptMsg)) return;
   const amt = prompt('Amount paid', defaultAmt.toFixed(2));
   if(amt === null || amt === '') return;
   const value = Number(amt);
   if(!Number.isFinite(value) || value <= 0) return alert('Please enter a valid amount.');
-  payments.push(normalizePayment({ billId: bill.id, bill: bill.name, amount: value, source: bill.source, paidAt: new Date().toISOString() }));
+  payments.push(normalizePayment({
+    billId: bill.id,
+    bill: bill.name,
+    amount: value,
+    source: bill.source,
+    paidAt: new Date().toISOString(),
+    targetPeriodStart: targetPeriodStart || null
+  }));
   save(); renderAll();
 }
 function editPayment(id){
@@ -626,25 +659,80 @@ function renderDashboardTimelineGraph(){
 }
 
 function renderDashboard(){
-  const period = getCurrentPayPeriod(); const list = billsForPeriod(period); const box = document.getElementById('dashboardBills'); box.innerHTML='';
+  const period = getCurrentPayPeriod();
+  const normalList = billsForPeriod(period);
+  const list = normalList.map(b => billDisplayForDashboard(b, period));
+  const box = document.getElementById('dashboardBills'); box.innerHTML='';
   document.getElementById('periodLabel').textContent = `${period.start.toLocaleDateString()} → ${period.end.toLocaleDateString()}`;
+
   let usaa=0, cc=0, external=0, paidCount=0, paidUsaa=0, paidCc=0, paidExternal=0;
-  list.forEach(b=>{
+  normalList.forEach(b=>{
     const payment = paymentForBillInPeriod(b.id, period);
-    if(payment){ paidCount++; if(payment.source==='USAA Bills') paidUsaa += payment.amount; else if(payment.source==='CC Pay') paidCc += payment.amount; else paidExternal += payment.amount; }
-    if(b.source==='USAA Bills') usaa += b.allocated; else if(b.source==='CC Pay') cc += b.allocated; else external += b.allocated;
+    if(payment){
+      paidCount++;
+      if(payment.source==='USAA Bills') paidUsaa += payment.amount;
+      else if(payment.source==='CC Pay') paidCc += payment.amount;
+      else paidExternal += payment.amount;
+    }
+    if(b.source==='USAA Bills') usaa += b.allocated;
+    else if(b.source==='CC Pay') cc += b.allocated;
+    else external += b.allocated;
   });
+
   const dueTotal = usaa + cc + external, income = incomeForPeriod(period), remaining = income - dueTotal;
-  document.getElementById('metricCount').textContent = `${paidCount}/${list.length}`; document.getElementById('metricUsaa').textContent = money(usaa); document.getElementById('metricCc').textContent = money(cc); document.getElementById('metricIncome').textContent = money(income); document.getElementById('metricRemaining').textContent = money(remaining);
-  document.getElementById('flowBillsPaid').textContent = money(paidUsaa); document.getElementById('flowCcPaid').textContent = money(paidCc); document.getElementById('flowExternalPaid').textContent = money(paidExternal);
+  document.getElementById('metricCount').textContent = `${paidCount}/${normalList.length}`;
+  document.getElementById('metricUsaa').textContent = money(usaa);
+  document.getElementById('metricCc').textContent = money(cc);
+  document.getElementById('metricIncome').textContent = money(income);
+  document.getElementById('metricRemaining').textContent = money(remaining);
+  document.getElementById('flowBillsPaid').textContent = money(paidUsaa);
+  document.getElementById('flowCcPaid').textContent = money(paidCc);
+  document.getElementById('flowExternalPaid').textContent = money(paidExternal);
+
   renderForecastCards();
   renderDashboardTimelineGraph();
   renderGroupedBills(period);
   renderDueTimeline(period);
-  const pct = list.length ? Math.min(100, (paidCount / list.length) * 100) : 0; document.getElementById('progressBar').style.width = pct + '%'; document.getElementById('progressNote').textContent = `${paidCount} of ${list.length} due bills paid this cycle. Total due this cycle: ${money(dueTotal)}.`;
-  const ring = document.getElementById('progressRing'); ring.style.background = `conic-gradient(var(--accent) 0deg, var(--accent-2) ${pct*3.6}deg, #10203b ${pct*3.6}deg, #10203b 360deg)`; document.getElementById('ringText').textContent = `${Math.round(pct)}%`;
-  if(!list.length){ box.innerHTML = '<div class="empty">No active bills due in this pay period yet.</div>'; return; }
-  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">Next Pay Period</button>`}</div></div></div>`; });
+  const pct = normalList.length ? Math.min(100, (paidCount / normalList.length) * 100) : 0;
+  document.getElementById('progressBar').style.width = pct + '%';
+  document.getElementById('progressNote').textContent = `${paidCount} of ${normalList.length} due bills paid this cycle. Total due this cycle: ${money(dueTotal)}.`;
+  const ring = document.getElementById('progressRing');
+  ring.style.background = `conic-gradient(var(--accent) 0deg, var(--accent-2) ${pct*3.6}deg, #10203b ${pct*3.6}deg, #10203b 360deg)`;
+  document.getElementById('ringText').textContent = `${Math.round(pct)}%`;
+
+  if(!list.length){
+    box.innerHTML = '<div class="empty">No active bills due in this pay period yet.</div>';
+    return;
+  }
+
+  list.forEach(b => {
+    const targetPeriod = b.advancedToNext ? getPeriodForOffset(1) : period;
+    const payment = paymentForBillInPeriod(b.id, targetPeriod);
+    const shownAmount = payment ? payment.amount : b.allocated;
+    const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, targetPeriod))}</span>` : '';
+    const splitSummary = b.split ? splitHistorySummary(b) : null;
+    const advanceBadge = b.advancedToNext ? `<span class="badge good">Next payday ${b.payday.toLocaleDateString()}</span>` : '';
+    const periodButton = `<button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${b.advancedToNext ? 'Undo Next Payday' : 'Next Payday'}</button>`;
+    let actions;
+    if(payment){
+      actions = `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>${periodButton}`;
+    } else {
+      const payLabel = b.advancedToNext ? 'Pay Early' : 'Pay';
+      actions = `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)}, '${esc(b.targetPeriodStart)}')">${payLabel}</button>${periodButton}`;
+    }
+    box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}">
+      <div>
+        <div class="name">${esc(b.name)}</div>
+        <div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div>
+        <div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${advanceBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div>
+      </div>
+      <div>
+        <div class="amount">${money(shownAmount)}</div>
+        <div class="meta" style="text-align:right">${payment ? (b.advancedToNext ? 'Paid early for next payday' : 'Actual payment') : (b.advancedToNext ? 'Upcoming payday amount' : 'Projected payment')}</div>
+        <div class="btnrow">${actions}</div>
+      </div>
+    </div>`;
+  });
 }
 function renderBills(){
   const term = (document.getElementById('billSearch').value || '').trim().toLowerCase();
@@ -652,12 +740,35 @@ function renderBills(){
   let filtered = bills.slice();
   if(term) filtered = filtered.filter(b => b.name.toLowerCase().includes(term) || b.source.toLowerCase().includes(term));
   if(!filtered.length){ box.innerHTML='<div class="empty">No matching bills found.</div>'; return; }
+
   const period = getCurrentPayPeriod();
+  const next = getPeriodForOffset(1);
   filtered.sort((a,b)=>a.name.localeCompare(b.name)).forEach(b => {
-    const allocated = amountDueThisCycle(b, period);
-    const paidThisCycle = paymentInPeriodForBill(b.id, period);
+    const advanced = isAdvancedToNextPeriod(b.id, period);
+    const target = advanced ? next : period;
+    let allocated = amountDueThisCycle(b, target);
+    if(advanced && allocated<=0) allocated = b.split ? b.amount/2 : b.amount;
+    const paidThisCycle = paymentInPeriodForBill(b.id, target);
     const splitSummary = b.split ? splitHistorySummary(b) : null;
-    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${isAdvancedToNextPeriod(b.id, period) ? 'Undo Next Pay Period' : 'Next Pay Period'}</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
+    const targetStart = toYMD(target.start);
+    const nextBadge = advanced ? `<span class="badge good">Viewing payday ${target.start.toLocaleDateString()}</span>` : '';
+    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}">
+      <div class="row">
+        <div>
+          <div class="title">${esc(b.name)}</div>
+          <div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, target)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div>
+          <div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">${advanced ? 'Next payday' : 'Current cycle'} ${money(allocated)}</span>` : ''}${nextBadge}${paidThisCycle ? '<span class="badge good">Paid for this payday</span>' : ''}</div>
+        </div>
+        <div class="amount">${money(b.amount)}</div>
+      </div>
+      <div class="btnrow">
+        <button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button>
+        <button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button>
+        <button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))}, '${esc(targetStart)}')">${advanced ? 'Pay Early' : 'Pay'}</button>
+        <button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${advanced ? 'Undo Next Payday' : 'Next Payday'}</button>
+        <button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button>
+      </div>
+    </div>`;
   });
 }
 function renderHistory(){
@@ -665,13 +776,14 @@ function renderHistory(){
   if(!payments.length){ box.innerHTML='<div class="empty">No payments logged yet.</div>'; return; }
   payments.slice().sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt)).forEach(p => {
     const splitBits = p.splitMeta ? ` • ${esc(p.splitMeta.label)}${p.splitMeta.cycleDueDate ? ` • Due ${esc(new Date(p.splitMeta.cycleDueDate + 'T00:00:00').toLocaleDateString())}` : ''}` : '';
-    box.innerHTML += `<div class="payment-card"><div class="payment-head"><div><div class="payment-main">${esc(p.bill)}</div><div class="payment-sub">${esc(new Date(p.paidAt).toLocaleDateString())} • ${esc(p.source)}${splitBits}</div></div><div class="payment-amount">${money(p.amount)}</div></div><div class="btnrow"><button class="btn btn-secondary btn-small" onclick="editPayment('${esc(p.id)}')">Edit Amount</button><button class="btn btn-danger btn-small" onclick="deletePayment('${esc(p.id)}')">Delete</button></div></div>`;
+    const targetBits = p.targetPeriodStart ? ` • Payday ${esc(parseDateOnly(p.targetPeriodStart).toLocaleDateString())}` : '';
+    box.innerHTML += `<div class="payment-card"><div class="payment-head"><div><div class="payment-main">${esc(p.bill)}</div><div class="payment-sub">${esc(new Date(p.paidAt).toLocaleDateString())} • ${esc(p.source)}${splitBits}${targetBits}</div></div><div class="payment-amount">${money(p.amount)}</div></div><div class="btnrow"><button class="btn btn-secondary btn-small" onclick="editPayment('${esc(p.id)}')">Edit Amount</button><button class="btn btn-danger btn-small" onclick="deletePayment('${esc(p.id)}')">Delete</button></div></div>`;
   });
 }
 function exportCSV(){ let csv='Date,Bill,Amount,Source\n'; payments.forEach(p => csv += `${new Date(p.paidAt).toLocaleDateString()},${p.bill},${p.amount},${p.source}\n`); downloadBlob(new Blob([csv],{type:'text/csv'}), 'mfam_payments.csv'); }
 function downloadBlob(blob, filename){ const a=document.createElement('a'); a.href = URL.createObjectURL(blob); a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); }
-function buildFullBackupPayload(){ return {app:'MFAM Bills',version:18,exportedAt:new Date().toISOString(),settings,bills,payments,advancedBills}; }
-function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v18_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
+function buildFullBackupPayload(){ return {app:'MFAM Bills',version:19,exportedAt:new Date().toISOString(),settings,bills,payments,advancedBills}; }
+function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v19_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
 function exportBillsBackup(){ exportFullBackup(); }
 function triggerImportBackup(){ triggerUniversalImport(); }
 function triggerUniversalImport(){ document.getElementById('universalImportFile').click(); }
@@ -773,508 +885,6 @@ if ('serviceWorker' in navigator) {
 }
 </script>
 
-<script>
 
-const STORAGE_KEY_BILLS = 'mfam_bills_v9';
-const STORAGE_KEY_PAYMENTS = 'mfam_payments_v9';
-const STORAGE_KEY_SETTINGS = 'mfam_settings_v1';
-const STORAGE_KEY_ADVANCE = 'mfam_advance_v1';
-const LEGACY_BILL_KEYS = ['mfam_bills_v8','mfam_bills_v7','mfam_bills_v6','mfam_bills_v5','mfam_bills_v2','mfam_bills'];
-const LEGACY_PAYMENT_KEYS = ['mfam_payments_v8','mfam_payments_v7','mfam_payments_v6','mfam_payments_v5','mfam_payments_v2','mfam_payments'];
-let editingBillId = null;
-let advancedBills = loadJSON(STORAGE_KEY_ADVANCE, {});
-function saveAdvance(){ localStorage.setItem(STORAGE_KEY_ADVANCE, JSON.stringify(advancedBills)); }
-function billAdvanceKey(billId, period){ return `${billId}|${toYMD(period.start)}`; }
-function isAdvancedToNextPeriod(billId, period){ return !!advancedBills[billAdvanceKey(billId, period)]; }
-function toggleAdvanceBill(billId){ const period=getCurrentPayPeriod(); const key=billAdvanceKey(billId, period); if(advancedBills[key]) delete advancedBills[key]; else advancedBills[key]=true; saveAdvance(); renderAll(); }
-
-function uid(prefix='id'){ return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
-function money(n){ return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n||0)); }
-function esc(s){ return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function toYMD(d){ const x = new Date(d); x.setHours(0,0,0,0); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; }
-function parseDateOnly(v){ const d = new Date(v + 'T00:00:00'); d.setHours(0,0,0,0); return d; }
-
-function showTab(id, btn){ document.querySelectorAll('.section').forEach(s=>s.classList.remove('active')); const section=document.getElementById(id); section.classList.add('active'); document.querySelectorAll('.navbtn').forEach(b=>b.classList.remove('active')); if(btn) btn.classList.add('active'); if(id==='graphs' || id==='dashboard'){ requestAnimationFrame(()=>setTimeout(renderAnalytics, 40)); } }
-function migrateOne(target, keys){ if(localStorage.getItem(target)) return; for(const key of keys){ const val = localStorage.getItem(key); if(val){ localStorage.setItem(target, val); return; } } }
-function migrateStorage(){ migrateOne(STORAGE_KEY_BILLS, LEGACY_BILL_KEYS); migrateOne(STORAGE_KEY_PAYMENTS, LEGACY_PAYMENT_KEYS); }
-function normalizeBill(b){
-  return {
-    id: b.id || uid('bill'),
-    name: String(b.name || '').trim(),
-    amount: Number(b.amount || 0),
-    day: Math.max(1, Math.min(31, Number(b.day || 1))),
-    source: b.source || 'USAA Bills',
-    split: !!b.split,
-    paidOff: !!b.paidOff
-  };
-}
-function normalizeSplitMeta(meta){
-  if(!meta) return null;
-  const installmentNumber = Math.max(1, Math.min(2, Number(meta.installmentNumber || 1)));
-  return {
-    installmentNumber,
-    installmentTotal: 2,
-    cycleDueDate: meta.cycleDueDate || null,
-    cycleKey: meta.cycleKey || meta.cycleDueDate || null,
-    label: meta.label || `Split ${installmentNumber}/2`
-  };
-}
-function normalizePayment(p){
-  const dt = p.paidAt || p.isoDate || p.date || new Date().toISOString();
-  const paidAt = new Date(dt).toISOString();
-  return {
-    id: p.id || uid('pay'),
-    billId: p.billId || null,
-    bill: p.bill || '',
-    amount: Number(p.amount || 0),
-    source: p.source || 'USAA Bills',
-    paidAt,
-    date: new Date(paidAt).toLocaleDateString(),
-    splitMeta: normalizeSplitMeta(p.splitMeta)
-  };
-}
-function loadJSON(key, fallback){ try{ return JSON.parse(localStorage.getItem(key)||'null') ?? fallback; }catch{ return fallback; } }
-migrateStorage();
-let bills = (loadJSON(STORAGE_KEY_BILLS, []) || []).map(normalizeBill);
-let payments = (loadJSON(STORAGE_KEY_PAYMENTS, []) || []).map(normalizePayment);
-const defaultSettings = { paycheckAmount:2506, nextPayday:'2026-03-14', monthlyDepositAmount:4550, monthlyDepositDay:1 };
-let settings = {...defaultSettings, ...(loadJSON(STORAGE_KEY_SETTINGS, {}) || {})};
-
-function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); saveAdvance(); }
-function syncSettingsForm(){ document.getElementById('paycheckAmount').value = settings.paycheckAmount ?? ''; document.getElementById('nextPayday').value = settings.nextPayday ?? ''; document.getElementById('monthlyDepositAmount').value = settings.monthlyDepositAmount ?? ''; document.getElementById('monthlyDepositDay').value = settings.monthlyDepositDay ?? ''; }
-function saveSettingsFromForm(){ settings.paycheckAmount = Number(document.getElementById('paycheckAmount').value || 0); settings.nextPayday = document.getElementById('nextPayday').value || defaultSettings.nextPayday; settings.monthlyDepositAmount = Number(document.getElementById('monthlyDepositAmount').value || 0); settings.monthlyDepositDay = Number(document.getElementById('monthlyDepositDay').value || 1); save(); renderAll(); }
-function clearBillForm(){ editingBillId = null; document.getElementById('billName').value=''; document.getElementById('billAmount').value=''; document.getElementById('billDay').value=''; document.getElementById('billSource').value='USAA Bills'; document.getElementById('billSplit').checked=false; document.getElementById('billSubmitBtn').textContent='Add Bill'; }
-function saveBillForm(){
-  const payload = normalizeBill({
-    id: editingBillId || uid('bill'),
-    name: document.getElementById('billName').value,
-    amount: document.getElementById('billAmount').value,
-    day: document.getElementById('billDay').value,
-    source: document.getElementById('billSource').value,
-    split: document.getElementById('billSplit').checked,
-    paidOff: editingBillId ? !!(bills.find(x=>x.id===editingBillId)||{}).paidOff : false
-  });
-  if(!payload.name || !payload.amount || !payload.day) return alert('Please complete bill name, amount, and due day.');
-  const existingIndex = bills.findIndex(b => b.id === payload.id);
-  if(existingIndex >= 0) bills[existingIndex] = payload; else bills.push(payload);
-  save(); clearBillForm(); renderAll();
-}
-function editBill(id){
-  const b = bills.find(x=>x.id===id); if(!b) return;
-  editingBillId = id;
-  document.getElementById('billName').value=b.name; document.getElementById('billAmount').value=b.amount; document.getElementById('billDay').value=b.day; document.getElementById('billSource').value=b.source; document.getElementById('billSplit').checked=!!b.split; document.getElementById('billSubmitBtn').textContent='Save Bill'; showTab('bills', document.querySelectorAll('.navbtn')[1]); window.scrollTo({top:0,behavior:'smooth'});
-}
-function deleteBill(id){ if(!confirm('Delete this bill?')) return; bills = bills.filter(b=>b.id!==id); save(); renderAll(); }
-function togglePaidOff(id){ const bill = bills.find(b=>b.id===id); if(!bill) return; bill.paidOff = !bill.paidOff; save(); renderAll(); }
-function getAnchorPayday(){ const d = parseDateOnly(settings.nextPayday || defaultSettings.nextPayday); return d; }
-function getCurrentPayPeriod(){ const today = new Date(); today.setHours(0,0,0,0); let start = getAnchorPayday(); if(today >= start){ const diffDays = Math.floor((today - start)/(1000*60*60*24)); const periods = Math.floor(diffDays / 14); start = new Date(start); start.setDate(start.getDate() + periods*14); } const end = new Date(start); end.setDate(end.getDate()+13); end.setHours(23,59,59,999); return {start,end}; }
-function getPeriodForOffset(offset=0){ const current = getCurrentPayPeriod(); const start = new Date(current.start); start.setDate(start.getDate() + offset*14); const end = new Date(start); end.setDate(start.getDate()+13); end.setHours(23,59,59,999); return {start,end}; }
-function dueDateForMonth(year, month, day){ const last = new Date(year, month+1, 0).getDate(); const d = new Date(year, month, Math.min(day,last)); d.setHours(0,0,0,0); return d; }
-function paymentInPeriodForBill(billId, period){ return payments.some(p => p.billId === billId && isDateInPeriod(new Date(p.paidAt), period)); }
-function paymentForBillInPeriod(billId, period){ return payments.filter(p => p.billId === billId && isDateInPeriod(new Date(p.paidAt), period)).sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt))[0] || null; }
-function isDateInPeriod(date, period){ const d = new Date(date); return d >= period.start && d <= period.end; }
-function nextDueDateOnOrAfter(bill, referenceDate){
-  const ref = new Date(referenceDate);
-  ref.setHours(0,0,0,0);
-  let due = dueDateForMonth(ref.getFullYear(), ref.getMonth(), bill.day);
-  if(due < ref) due = dueDateForMonth(ref.getFullYear(), ref.getMonth()+1, bill.day);
-  return due;
-}
-function amountDueThisCycle(bill, period){
-  const due = nextDueDateOnOrAfter(bill, period.start);
-  const nextPeriodEnd = new Date(period.end.getTime() + 14*24*60*60*1000);
-  if(bill.split) return due <= nextPeriodEnd ? bill.amount / 2 : 0;
-  return due >= period.start && due <= period.end ? bill.amount : 0;
-}
-function displayDueDate(bill, period){
-  return nextDueDateOnOrAfter(bill, period.start);
-}
-function splitProgressLabel(bill, period){
-  if(!bill.split) return '';
-  const due = displayDueDate(bill, period);
-  const inCurrent = due >= period.start && due <= period.end;
-  return inCurrent ? 'Split 2/2' : 'Split 1/2';
-}
-function splitProgressDetail(bill, period){
-  const label = splitProgressLabel(bill, period);
-  return label ? ` • ${label}` : '';
-}
-function splitCycleMetaForPeriod(bill, period){
-  if(!bill.split) return null;
-  const due = displayDueDate(bill, period);
-  const inCurrent = due >= period.start && due <= period.end;
-  const installmentNumber = inCurrent ? 2 : 1;
-  return {
-    installmentNumber,
-    installmentTotal: 2,
-    cycleDueDate: toYMD(due),
-    cycleKey: toYMD(due),
-    label: `Split ${installmentNumber}/2`
-  };
-}
-function paymentsForBill(billId){
-  return payments.filter(p => p.billId === billId).sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt));
-}
-function latestSplitPaymentForCycle(billId, cycleKey, installmentNumber=null){
-  const matching = paymentsForBill(billId).filter(p => p.splitMeta && p.splitMeta.cycleKey === cycleKey && (installmentNumber ? p.splitMeta.installmentNumber === installmentNumber : true));
-  return matching[0] || null;
-}
-function splitHistorySummary(bill){
-  if(!bill.split) return null;
-  const splitPayments = paymentsForBill(bill.id).filter(p => p.splitMeta);
-  if(!splitPayments.length) return {count:0, text:'No installments logged yet.'};
-  const uniqueCycles = new Set(splitPayments.map(p => p.splitMeta.cycleKey).filter(Boolean));
-  const latest = splitPayments[0];
-  const latestText = latest?.splitMeta?.label ? `${latest.splitMeta.label} on ${new Date(latest.paidAt).toLocaleDateString()}` : `Latest payment on ${new Date(latest.paidAt).toLocaleDateString()}`;
-  return {count:splitPayments.length, cycleCount:uniqueCycles.size, text:`${splitPayments.length} installments logged across ${uniqueCycles.size} due cycle${uniqueCycles.size===1?'':'s'} • ${latestText}`};
-}
-function billsForPeriod(period){
-  const current = getCurrentPayPeriod();
-  const isCurrent = toYMD(period.start)===toYMD(current.start);
-  const isNext = toYMD(period.start)===toYMD(getPeriodForOffset(1).start);
-  return bills.filter(b=>!b.paidOff).map(b=>{
-    let allocated = amountDueThisCycle(b, period);
-    const advancedNow = isCurrent && isAdvancedToNextPeriod(b.id, current);
-    const advancedIntoThis = isNext && isAdvancedToNextPeriod(b.id, current);
-    if(advancedNow) return null;
-    if(advancedIntoThis && allocated<=0){
-      allocated = amountDueThisCycle(b, current);
-      if(allocated<=0) return null;
-      const paidThisCycle = paymentInPeriodForBill(b.id, period);
-      return {...b, allocated, paidThisCycle, due: displayDueDate(b, current), advancedFromPrior:true};
-    }
-    if(allocated <= 0) return null;
-    const paidThisCycle = paymentInPeriodForBill(b.id, period);
-    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period), advancedFromPrior:advancedIntoThis};
-  }).filter(Boolean).sort((a,b)=>a.due-b.due || a.name.localeCompare(b.name));
-}
-function incomeForPeriod(period){
-  let total = Number(settings.paycheckAmount || 0);
-  const monthsToCheck = [
-    {year:period.start.getFullYear(), month:period.start.getMonth()},
-    {year:period.end.getFullYear(), month:period.end.getMonth()},
-    {year:new Date(period.end.getFullYear(), period.end.getMonth()+1, 1).getFullYear(), month:new Date(period.end.getFullYear(), period.end.getMonth()+1, 1).getMonth()}
-  ];
-  const seen = new Set();
-  monthsToCheck.forEach(({year,month})=>{
-    const key=`${year}-${month}`; if(seen.has(key)) return; seen.add(key);
-    const day = Math.min(Number(settings.monthlyDepositDay || 1), new Date(year, month+1, 0).getDate());
-    const deposit = new Date(year, month, day); deposit.setHours(0,0,0,0);
-    if(deposit >= period.start && deposit <= period.end) total += Number(settings.monthlyDepositAmount || 0);
-  });
-  return total;
-}
-function logPayment(billId, suggestedAmount){
-  const bill = bills.find(b=>b.id===billId); if(!bill) return;
-  if(bill.paidOff) return alert('This bill is marked paid off. Set it back to Active first if you need to log a payment.');
-  const defaultAmt = Number(suggestedAmount ?? (bill.split ? bill.amount/2 : bill.amount));
-  const promptMsg = `Log payment for ${bill.name}\nSuggested amount: ${defaultAmt.toFixed(2)}\nSource: ${bill.source}`;
-  if(!confirm(promptMsg)) return;
-  const amt = prompt('Amount paid', defaultAmt.toFixed(2));
-  if(amt === null || amt === '') return;
-  const value = Number(amt);
-  if(!Number.isFinite(value) || value <= 0) return alert('Please enter a valid amount.');
-  payments.push(normalizePayment({ billId: bill.id, bill: bill.name, amount: value, source: bill.source, paidAt: new Date().toISOString() }));
-  save(); renderAll();
-}
-function editPayment(id){
-  const p = payments.find(x=>x.id===id); if(!p) return;
-  const amount = prompt(`Edit amount for ${p.bill}`, String(p.amount));
-  if(amount === null) return;
-  const value = Number(amount);
-  if(!Number.isFinite(value) || value <= 0) return alert('Please enter a valid amount.');
-  const sourceOptions = ['USAA Bills','CC Pay','External / Allotment'];
-  const currentIndex = Math.max(1, sourceOptions.indexOf(p.source)+1);
-  const sourcePick = prompt(`Payment source:
-1. USAA Bills
-2. CC Pay
-3. External / Allotment`, String(currentIndex));
-  if(sourcePick === null) return;
-  const picked = sourceOptions[Number(sourcePick)-1] || p.source;
-  p.amount = value;
-  p.source = picked;
-  p.date = new Date(p.paidAt).toLocaleDateString();
-  save(); renderAll();
-}
-function deletePayment(id){ if(!confirm('Delete this payment record?')) return; payments = payments.filter(p=>p.id!==id); save(); renderAll(); }
-
-function sourceClass(source){
-  if(source === 'USAA Bills') return 'source-usaa';
-  if(source === 'CC Pay') return 'source-cc';
-  return 'source-external';
-}
-function renderAllocation(period, dueBills, income){
-  const totalDue = dueBills.reduce((sum,b)=>sum + Number(b.allocated || 0), 0);
-  const usaa = dueBills.filter(b=>b.source==='USAA Bills').reduce((sum,b)=>sum + Number(b.allocated || 0), 0);
-  const cc = dueBills.filter(b=>b.source==='CC Pay').reduce((sum,b)=>sum + Number(b.allocated || 0), 0);
-  const external = dueBills.filter(b=>b.source==='External / Allotment').reduce((sum,b)=>sum + Number(b.allocated || 0), 0);
-  const remaining = Math.max(income - totalDue, 0);
-  const total = Math.max(income, totalDue, 1);
-  const rows = [
-    {name:'USAA Bills', value:usaa, color:'#58a6ff'},
-    {name:'CC Pay', value:cc, color:'#7c3aed'},
-    {name:'Allotment', value:external, color:'#22c55e'},
-    {name:'Remaining', value:remaining, color:'#f59e0b'}
-  ];
-  document.getElementById('allocationTotal').textContent = money(income);
-  document.getElementById('allocationSub').textContent = `${period.start.toLocaleDateString()} → ${period.end.toLocaleDateString()} • Due this cycle ${money(totalDue)}`;
-  document.getElementById('allocationBar').innerHTML = rows.map(row => `<div class="alloc-seg" style="width:${((row.value/total)*100).toFixed(2)}%;background:${row.color}"></div>`).join('');
-  document.getElementById('allocationLegend').innerHTML = rows.map(row => `<div class="alloc-item"><div class="alloc-left"><span class="alloc-dot" style="background:${row.color}"></span><span class="alloc-name">${row.name}</span></div><div class="alloc-value">${money(row.value)}</div></div>`).join('');
-}
-
-function getForecastData(count=3){
-  const rows = [];
-  for(let i=0;i<count;i++){
-    const period = getPeriodForOffset(i);
-    const dueBills = billsForPeriod(period);
-    const due = dueBills.reduce((sum,b)=>sum + Number(b.allocated || 0), 0);
-    const paid = payments.filter(p => isDateInPeriod(new Date(p.paidAt), period)).reduce((sum,p)=>sum + Number(p.amount || 0), 0);
-    const income = incomeForPeriod(period);
-    rows.push({
-      index:i,
-      label:`${period.start.toLocaleDateString()} → ${period.end.toLocaleDateString()}`,
-      shortLabel:`${period.start.getMonth()+1}/${period.start.getDate()}`,
-      income,
-      due,
-      paid,
-      remaining: income - due,
-      billCount: dueBills.length,
-      splitCount: dueBills.filter(b=>b.split).length
-    });
-  }
-  return rows;
-}
-function renderForecastCards(){
-  const box = document.getElementById('forecastGrid'); if(!box) return;
-  const forecast = getForecastData(3);
-  box.innerHTML = '';
-  forecast.forEach((row, idx) => {
-    const title = idx === 0 ? 'Current Cycle' : `Next Cycle ${idx}`;
-    box.innerHTML += `<div class="forecast-card">
-      <div class="forecast-label">${title}</div>
-      <div class="forecast-value">${money(row.remaining)}</div>
-      <div class="forecast-sub">${row.label}</div>
-      <div class="badges" style="margin-top:10px">
-        <span class="badge">${row.billCount} bills</span>
-        <span class="badge">${row.splitCount} split</span>
-        <span class="badge">Income ${money(row.income)}</span>
-        <span class="badge">Due ${money(row.due)}</span>
-      </div>
-    </div>`;
-  });
-}
-function renderGroupedBills(period){
-  const box = document.getElementById('groupedBills'); if(!box) return;
-  const items = billsForPeriod(period);
-  const groups = ['USAA Bills','CC Pay','External / Allotment'].map(source => {
-    const list = items.filter(item => item.source === source);
-    const total = list.reduce((sum,item)=>sum + Number(item.allocated || 0), 0);
-    return {source,list,total};
-  }).filter(group => group.list.length);
-  box.innerHTML = '';
-  if(!groups.length){
-    box.innerHTML = '<div class="group-card"><div class="group-empty">No grouped bills for this pay period yet.</div></div>';
-    return;
-  }
-  groups.forEach(group => {
-    const rows = group.list.slice(0,4).map(item => {
-      const payment = paymentForBillInPeriod(item.id, period);
-      const splitSummary = item.split ? splitHistorySummary(item) : null;
-      return `<div class="group-row">
-        <div>
-          <div class="group-name">${esc(item.name)}</div>
-          <div class="group-meta">Due ${item.due.toLocaleDateString()}${splitProgressDetail(item, period)}${payment ? ' • Paid' : ''}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div>
-        </div>
-        <div class="group-value" style="font-size:18px">${money(payment ? payment.amount : item.allocated)}</div>
-      </div>`;
-    }).join('');
-    const more = group.list.length > 4 ? `<div class="group-sub">+${group.list.length - 4} more in this group</div>` : '';
-    box.innerHTML += `<div class="group-card">
-      <div class="group-header">
-        <div>
-          <div class="group-label">Funding source</div>
-          <div class="group-name">${esc(group.source)}</div>
-        </div>
-        <div class="badges"><span class="badge ${sourceClass(group.source)}">${money(group.total)}</span></div>
-      </div>
-      ${rows}
-      ${more}
-    </div>`;
-  });
-}
-function renderDueTimeline(period){
-  const box = document.getElementById('dueTimeline'); if(!box) return;
-  const items = billsForPeriod(period).slice().sort((a,b)=>a.due-b.due).slice(0,8);
-  box.innerHTML = '';
-  if(!items.length){
-    box.innerHTML = '<div class="timeline-card"><div class="group-empty">No due bills in this cycle yet.</div></div>';
-    return;
-  }
-  items.forEach(item => {
-    const payment = paymentForBillInPeriod(item.id, period);
-    box.innerHTML += `<div class="timeline-item">
-      <div class="timeline-top">
-        <div>
-          <div class="timeline-date">Due ${item.due.toLocaleDateString()}</div>
-          <div class="group-name">${esc(item.name)}</div>
-          <div class="group-meta">${esc(item.source)}${splitProgressDetail(item, period)}${payment ? ' • Paid' : ''}${item.split && splitHistorySummary(item) ? ` • ${esc(splitHistorySummary(item).text)}` : ''}</div>
-        </div>
-        <div class="timeline-amount">${money(payment ? payment.amount : item.allocated)}</div>
-      </div>
-    </div>`;
-  });
-}
-
-
-function renderDashboardTimelineGraph(){
-  const box = document.getElementById('dashboardTimelineGraph'); if(!box) return;
-  const rows = getForecastData(6).map((row, idx) => ({
-    name: idx === 0 ? 'Now' : `+${idx}`,
-    value: row.due,
-    meta: `${row.shortLabel} • ${row.billCount} bills${row.splitCount ? ` • ${row.splitCount} split` : ''} • Remaining ${money(row.remaining)}`
-  }));
-  box.innerHTML = analyticsBarRows(rows, { emptyText:'No forecast data yet.' });
-}
-
-function renderDashboard(){
-  const period = getCurrentPayPeriod(); const list = billsForPeriod(period); const box = document.getElementById('dashboardBills'); box.innerHTML='';
-  document.getElementById('periodLabel').textContent = `${period.start.toLocaleDateString()} → ${period.end.toLocaleDateString()}`;
-  let usaa=0, cc=0, external=0, paidCount=0, paidUsaa=0, paidCc=0, paidExternal=0;
-  list.forEach(b=>{
-    const payment = paymentForBillInPeriod(b.id, period);
-    if(payment){ paidCount++; if(payment.source==='USAA Bills') paidUsaa += payment.amount; else if(payment.source==='CC Pay') paidCc += payment.amount; else paidExternal += payment.amount; }
-    if(b.source==='USAA Bills') usaa += b.allocated; else if(b.source==='CC Pay') cc += b.allocated; else external += b.allocated;
-  });
-  const dueTotal = usaa + cc + external, income = incomeForPeriod(period), remaining = income - dueTotal;
-  document.getElementById('metricCount').textContent = `${paidCount}/${list.length}`; document.getElementById('metricUsaa').textContent = money(usaa); document.getElementById('metricCc').textContent = money(cc); document.getElementById('metricIncome').textContent = money(income); document.getElementById('metricRemaining').textContent = money(remaining);
-  document.getElementById('flowBillsPaid').textContent = money(paidUsaa); document.getElementById('flowCcPaid').textContent = money(paidCc); document.getElementById('flowExternalPaid').textContent = money(paidExternal);
-  renderForecastCards();
-  renderDashboardTimelineGraph();
-  renderGroupedBills(period);
-  renderDueTimeline(period);
-  const pct = list.length ? Math.min(100, (paidCount / list.length) * 100) : 0; document.getElementById('progressBar').style.width = pct + '%'; document.getElementById('progressNote').textContent = `${paidCount} of ${list.length} due bills paid this cycle. Total due this cycle: ${money(dueTotal)}.`;
-  const ring = document.getElementById('progressRing'); ring.style.background = `conic-gradient(var(--accent) 0deg, var(--accent-2) ${pct*3.6}deg, #10203b ${pct*3.6}deg, #10203b 360deg)`; document.getElementById('ringText').textContent = `${Math.round(pct)}%`;
-  if(!list.length){ box.innerHTML = '<div class="empty">No active bills due in this pay period yet.</div>'; return; }
-  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">Next Pay Period</button>`}</div></div></div>`; });
-}
-function renderBills(){
-  const term = (document.getElementById('billSearch').value || '').trim().toLowerCase();
-  const box = document.getElementById('billList'); box.innerHTML='';
-  let filtered = bills.slice();
-  if(term) filtered = filtered.filter(b => b.name.toLowerCase().includes(term) || b.source.toLowerCase().includes(term));
-  if(!filtered.length){ box.innerHTML='<div class="empty">No matching bills found.</div>'; return; }
-  const period = getCurrentPayPeriod();
-  filtered.sort((a,b)=>a.name.localeCompare(b.name)).forEach(b => {
-    const allocated = amountDueThisCycle(b, period);
-    const paidThisCycle = paymentInPeriodForBill(b.id, period);
-    const splitSummary = b.split ? splitHistorySummary(b) : null;
-    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${isAdvancedToNextPeriod(b.id, period) ? 'Undo Next Pay Period' : 'Next Pay Period'}</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
-  });
-}
-function renderHistory(){
-  const box = document.getElementById('historyList'); box.innerHTML='';
-  if(!payments.length){ box.innerHTML='<div class="empty">No payments logged yet.</div>'; return; }
-  payments.slice().sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt)).forEach(p => {
-    const splitBits = p.splitMeta ? ` • ${esc(p.splitMeta.label)}${p.splitMeta.cycleDueDate ? ` • Due ${esc(new Date(p.splitMeta.cycleDueDate + 'T00:00:00').toLocaleDateString())}` : ''}` : '';
-    box.innerHTML += `<div class="payment-card"><div class="payment-head"><div><div class="payment-main">${esc(p.bill)}</div><div class="payment-sub">${esc(new Date(p.paidAt).toLocaleDateString())} • ${esc(p.source)}${splitBits}</div></div><div class="payment-amount">${money(p.amount)}</div></div><div class="btnrow"><button class="btn btn-secondary btn-small" onclick="editPayment('${esc(p.id)}')">Edit Amount</button><button class="btn btn-danger btn-small" onclick="deletePayment('${esc(p.id)}')">Delete</button></div></div>`;
-  });
-}
-function exportCSV(){ let csv='Date,Bill,Amount,Source\n'; payments.forEach(p => csv += `${new Date(p.paidAt).toLocaleDateString()},${p.bill},${p.amount},${p.source}\n`); downloadBlob(new Blob([csv],{type:'text/csv'}), 'mfam_payments.csv'); }
-function downloadBlob(blob, filename){ const a=document.createElement('a'); a.href = URL.createObjectURL(blob); a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); }
-function buildFullBackupPayload(){ return {app:'MFAM Bills',version:18,exportedAt:new Date().toISOString(),settings,bills,payments,advancedBills}; }
-function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v18_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
-function exportBillsBackup(){ exportFullBackup(); }
-function triggerImportBackup(){ triggerUniversalImport(); }
-function triggerUniversalImport(){ document.getElementById('universalImportFile').click(); }
-function importBillsBackup(event){ importUniversalBackup(event); }
-function importUniversalBackup(event){ const file = event.target.files && event.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = e => { try{ const parsed = JSON.parse(e.target.result); if(!parsed || !Array.isArray(parsed.bills)) throw new Error('Invalid'); if(!confirm(`Replace current app data with backup from ${new Date(parsed.exportedAt || Date.now()).toLocaleString()}?\n\nBills: ${(parsed.bills||[]).length}\nPayments: ${Array.isArray(parsed.payments)?parsed.payments.length:0}\n\nYour current data will be exported first as a safety backup.`)) return; exportFullBackup(`mfam_auto_backup_before_restore_${new Date().toISOString().slice(0,10)}.json`); bills = (parsed.bills || []).map(normalizeBill); payments = Array.isArray(parsed.payments) ? parsed.payments.map(normalizePayment) : []; settings = {...defaultSettings, ...(parsed.settings || settings)}; advancedBills = parsed.advancedBills || {}; save(); syncSettingsForm(); clearBillForm(); renderAll(); alert(`Backup restored successfully.\nImported from version ${parsed.version || 'legacy'} backup.`); } catch(err){ alert('That file could not be imported.'); } finally { event.target.value=''; } }; reader.readAsText(file); }
-
-function analyticsBarRows(rows, opts={}){
-  if(!rows.length) return '<div class="analytics-empty">No payment data yet for this pay period.</div>';
-  const max = Math.max(...rows.map(r=>Number(r.value||0)), 1);
-  return `<div class="analytics-bars">${rows.map(row => {
-    const pct = Math.max(4, (Number(row.value||0) / max) * 100);
-    const fill = row.color ? `background:${row.color}` : '';
-    return `<div class="analytics-row">
-      <div class="analytics-head">
-        <div>
-          <div class="analytics-name">${esc(row.name)}</div>
-          <div class="analytics-meta">${esc(row.meta || '')}</div>
-        </div>
-        <div class="analytics-value">${row.display || money(row.value || 0)}</div>
-      </div>
-      <div class="analytics-track"><div class="analytics-fill" style="width:${pct.toFixed(1)}%;${fill}"></div></div>
-    </div>`;
-  }).join('')}</div>`;
-}
-function renderAnalytics(){
-  const period = getCurrentPayPeriod();
-  const currentPayments = payments.filter(p => isDateInPeriod(new Date(p.paidAt), period));
-  let usaa=0, cc=0, external=0;
-  currentPayments.forEach(p => { if(p.source==='USAA Bills') usaa += p.amount; else if(p.source==='CC Pay') cc += p.amount; else external += p.amount; });
-  document.getElementById('analyticsSources').innerHTML = analyticsBarRows([
-    {name:'USAA Bills', value:usaa, color:'#58a6ff'},
-    {name:'CC Pay', value:cc, color:'#7c3aed'},
-    {name:'External / Allotment', value:external, color:'#22c55e'}
-  ].filter(r=>r.value>0));
-
-  const byBill = {};
-  currentPayments.forEach(p => { byBill[p.bill] = (byBill[p.bill] || 0) + Number(p.amount || 0); });
-  const billRows = Object.entries(byBill).sort((a,b)=>b[1]-a[1]).map(([name, value]) => ({name, value, meta:'Actual paid this cycle'}));
-  document.getElementById('analyticsBills').innerHTML = analyticsBarRows(billRows);
-
-  const timelineRows = [];
-  for(let i=0;i<14;i++){
-    const d = new Date(period.start); d.setDate(period.start.getDate()+i);
-    const total = currentPayments.filter(p => toYMD(p.paidAt)===toYMD(d)).reduce((sum,p)=>sum+p.amount,0);
-    if(total>0) timelineRows.push({name:d.toLocaleDateString(), value:total, meta:'Paid on this date'});
-  }
-  document.getElementById('analyticsTimeline').innerHTML = analyticsBarRows(timelineRows.length ? timelineRows : []);
-
-  const dueBills = billsForPeriod(period);
-  const paidBills = dueBills.filter(b=>!!paymentForBillInPeriod(b.id, period));
-  const unpaidBills = dueBills.filter(b=>!paymentForBillInPeriod(b.id, period));
-  document.getElementById('analyticsCompletion').innerHTML = `
-    <div class="analytics-grid-2">
-      <div class="analytics-chip"><div class="analytics-meta">Bills due this cycle</div><div class="big">${dueBills.length}</div></div>
-      <div class="analytics-chip"><div class="analytics-meta">Completion rate</div><div class="big">${dueBills.length ? Math.round((paidBills.length/dueBills.length)*100) : 0}%</div></div>
-      <div class="analytics-chip"><div class="analytics-meta">Paid</div><div class="big">${paidBills.length}</div></div>
-      <div class="analytics-chip"><div class="analytics-meta">Still due</div><div class="big">${unpaidBills.length}</div></div>
-    </div>
-    <div style="margin-top:12px">${analyticsBarRows([
-      {name:'Paid this cycle', value:paidBills.length || 0, meta:'Bills already logged'},
-      {name:'Still due', value:unpaidBills.length || 0, meta:'Bills not yet logged'}
-    ].filter(r=>r.value>0), {unit:'count'})}</div>`;
-
-  const forecast = getForecastData(3);
-  document.getElementById('analyticsForecast').innerHTML = `<div class="forecast-analytics">${forecast.map((row, idx) => {
-    const max = Math.max(row.income, row.due, Math.max(row.remaining,0), 1);
-    const incomePct = (row.income/max)*100;
-    const duePct = (row.due/max)*100;
-    const remPct = (Math.max(row.remaining,0)/max)*100;
-    return `<div class="analytics-row">
-      <div class="analytics-head">
-        <div>
-          <div class="analytics-name">${idx===0?'Current Cycle':`Next Cycle ${idx}`}</div>
-          <div class="analytics-meta">${row.label}</div>
-        </div>
-        <div class="analytics-value">${money(row.remaining)}</div>
-      </div>
-      <div class="analytics-meta" style="margin-bottom:8px">Income</div>
-      <div class="analytics-track"><div class="analytics-fill" style="width:${incomePct.toFixed(1)}%;background:#58a6ff"></div></div>
-      <div class="analytics-meta" style="margin:8px 0 8px">Due</div>
-      <div class="analytics-track"><div class="analytics-fill" style="width:${duePct.toFixed(1)}%;background:#7c3aed"></div></div>
-      <div class="analytics-meta" style="margin:8px 0 8px">Remaining</div>
-      <div class="analytics-track"><div class="analytics-fill" style="width:${remPct.toFixed(1)}%;background:#22c55e"></div></div>
-      <div class="legend"><span class="badge">${row.billCount} bills</span><span class="badge">Income ${money(row.income)}</span><span class="badge">Due ${money(row.due)}</span></div>
-    </div>`;
-  }).join('')}</div>`;
-}
-
-function updateBackupMeta(){ const el = document.getElementById('backupMeta'); if(!el) return; const lastPayment = payments.length ? new Date(payments.slice().sort((a,b)=>new Date(b.paidAt)-new Date(a.paidAt))[0].paidAt).toLocaleString() : 'No payments yet'; el.textContent = `Use one backup file to move everything into future MFAM Bills builds, including this new layout. Bills: ${bills.length} • Payments: ${payments.length} • Latest payment: ${lastPayment}`; }
-function renderAll(){ syncSettingsForm(); renderDashboard(); renderBills(); renderHistory(); updateBackupMeta(); setTimeout(renderAnalytics, 30); }
-renderAll();
-
-</script>
 </body>
 </html>
