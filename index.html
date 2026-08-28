@@ -84,7 +84,6 @@ input,select{width:100%;padding:14px 12px;border-radius:14px;border:1px solid #2
 @media (max-width:760px){.metrics{grid-template-columns:1fr 1fr}.controls{grid-template-columns:1fr}.bill-card{grid-template-columns:1fr}.amount{text-align:left}.btnrow .btn{flex:1}.payment-head{flex-direction:column}.payment-amount{font-size:22px}.mini-flow{grid-template-columns:1fr}.hero h2{font-size:28px}#graphs{height:calc(100vh - 150px)}.graph-tile{min-height:calc(100vh - 176px);padding:14px}.graph-tile canvas{height:calc(100vh - 300px);min-height:360px;max-height:62vh}}
 </style>
 <meta name="theme-color" content="#08111f" />
-<link rel="manifest" href="manifest.webmanifest" />
 <link rel="apple-touch-icon" href="icon.svg" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -93,7 +92,7 @@ input,select{width:100%;padding:14px 12px;border-radius:14px;border:1px solid #2
 <body>
 <header class="wrap">
   <div class="app-title">MFAM Bills</div>
-  <div class="sub">Pay-period bill planner • Version 17</div>
+  <div class="sub">Pay-period bill planner • Version 18</div>
 </header>
 <div class="wrap">
   <div class="topbar">
@@ -268,9 +267,15 @@ input,select{width:100%;padding:14px 12px;border-radius:14px;border:1px solid #2
 const STORAGE_KEY_BILLS = 'mfam_bills_v9';
 const STORAGE_KEY_PAYMENTS = 'mfam_payments_v9';
 const STORAGE_KEY_SETTINGS = 'mfam_settings_v1';
+const STORAGE_KEY_ADVANCE = 'mfam_advance_v1';
 const LEGACY_BILL_KEYS = ['mfam_bills_v8','mfam_bills_v7','mfam_bills_v6','mfam_bills_v5','mfam_bills_v2','mfam_bills'];
 const LEGACY_PAYMENT_KEYS = ['mfam_payments_v8','mfam_payments_v7','mfam_payments_v6','mfam_payments_v5','mfam_payments_v2','mfam_payments'];
 let editingBillId = null;
+let advancedBills = loadJSON(STORAGE_KEY_ADVANCE, {});
+function saveAdvance(){ localStorage.setItem(STORAGE_KEY_ADVANCE, JSON.stringify(advancedBills)); }
+function billAdvanceKey(billId, period){ return `${billId}|${toYMD(period.start)}`; }
+function isAdvancedToNextPeriod(billId, period){ return !!advancedBills[billAdvanceKey(billId, period)]; }
+function toggleAdvanceBill(billId){ const period=getCurrentPayPeriod(); const key=billAdvanceKey(billId, period); if(advancedBills[key]) delete advancedBills[key]; else advancedBills[key]=true; saveAdvance(); renderAll(); }
 
 function uid(prefix='id'){ return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
 function money(n){ return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n||0)); }
@@ -324,7 +329,7 @@ let payments = (loadJSON(STORAGE_KEY_PAYMENTS, []) || []).map(normalizePayment);
 const defaultSettings = { paycheckAmount:2506, nextPayday:'2026-03-14', monthlyDepositAmount:4550, monthlyDepositDay:1 };
 let settings = {...defaultSettings, ...(loadJSON(STORAGE_KEY_SETTINGS, {}) || {})};
 
-function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); }
+function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); saveAdvance(); }
 function syncSettingsForm(){ document.getElementById('paycheckAmount').value = settings.paycheckAmount ?? ''; document.getElementById('nextPayday').value = settings.nextPayday ?? ''; document.getElementById('monthlyDepositAmount').value = settings.monthlyDepositAmount ?? ''; document.getElementById('monthlyDepositDay').value = settings.monthlyDepositDay ?? ''; }
 function saveSettingsFromForm(){ settings.paycheckAmount = Number(document.getElementById('paycheckAmount').value || 0); settings.nextPayday = document.getElementById('nextPayday').value || defaultSettings.nextPayday; settings.monthlyDepositAmount = Number(document.getElementById('monthlyDepositAmount').value || 0); settings.monthlyDepositDay = Number(document.getElementById('monthlyDepositDay').value || 1); save(); renderAll(); }
 function clearBillForm(){ editingBillId = null; document.getElementById('billName').value=''; document.getElementById('billAmount').value=''; document.getElementById('billDay').value=''; document.getElementById('billSource').value='USAA Bills'; document.getElementById('billSplit').checked=false; document.getElementById('billSubmitBtn').textContent='Add Bill'; }
@@ -413,11 +418,23 @@ function splitHistorySummary(bill){
   return {count:splitPayments.length, cycleCount:uniqueCycles.size, text:`${splitPayments.length} installments logged across ${uniqueCycles.size} due cycle${uniqueCycles.size===1?'':'s'} • ${latestText}`};
 }
 function billsForPeriod(period){
+  const current = getCurrentPayPeriod();
+  const isCurrent = toYMD(period.start)===toYMD(current.start);
+  const isNext = toYMD(period.start)===toYMD(getPeriodForOffset(1).start);
   return bills.filter(b=>!b.paidOff).map(b=>{
-    const allocated = amountDueThisCycle(b, period);
+    let allocated = amountDueThisCycle(b, period);
+    const advancedNow = isCurrent && isAdvancedToNextPeriod(b.id, current);
+    const advancedIntoThis = isNext && isAdvancedToNextPeriod(b.id, current);
+    if(advancedNow) return null;
+    if(advancedIntoThis && allocated<=0){
+      allocated = amountDueThisCycle(b, current);
+      if(allocated<=0) return null;
+      const paidThisCycle = paymentInPeriodForBill(b.id, period);
+      return {...b, allocated, paidThisCycle, due: displayDueDate(b, current), advancedFromPrior:true};
+    }
     if(allocated <= 0) return null;
     const paidThisCycle = paymentInPeriodForBill(b.id, period);
-    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period)};
+    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period), advancedFromPrior:advancedIntoThis};
   }).filter(Boolean).sort((a,b)=>a.due-b.due || a.name.localeCompare(b.name));
 }
 function incomeForPeriod(period){
@@ -627,7 +644,7 @@ function renderDashboard(){
   const pct = list.length ? Math.min(100, (paidCount / list.length) * 100) : 0; document.getElementById('progressBar').style.width = pct + '%'; document.getElementById('progressNote').textContent = `${paidCount} of ${list.length} due bills paid this cycle. Total due this cycle: ${money(dueTotal)}.`;
   const ring = document.getElementById('progressRing'); ring.style.background = `conic-gradient(var(--accent) 0deg, var(--accent-2) ${pct*3.6}deg, #10203b ${pct*3.6}deg, #10203b 360deg)`; document.getElementById('ringText').textContent = `${Math.round(pct)}%`;
   if(!list.length){ box.innerHTML = '<div class="empty">No active bills due in this pay period yet.</div>'; return; }
-  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button>`}</div></div></div>`; });
+  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">Next Pay Period</button>`}</div></div></div>`; });
 }
 function renderBills(){
   const term = (document.getElementById('billSearch').value || '').trim().toLowerCase();
@@ -640,7 +657,7 @@ function renderBills(){
     const allocated = amountDueThisCycle(b, period);
     const paidThisCycle = paymentInPeriodForBill(b.id, period);
     const splitSummary = b.split ? splitHistorySummary(b) : null;
-    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
+    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${isAdvancedToNextPeriod(b.id, period) ? 'Undo Next Pay Period' : 'Next Pay Period'}</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
   });
 }
 function renderHistory(){
@@ -653,13 +670,13 @@ function renderHistory(){
 }
 function exportCSV(){ let csv='Date,Bill,Amount,Source\n'; payments.forEach(p => csv += `${new Date(p.paidAt).toLocaleDateString()},${p.bill},${p.amount},${p.source}\n`); downloadBlob(new Blob([csv],{type:'text/csv'}), 'mfam_payments.csv'); }
 function downloadBlob(blob, filename){ const a=document.createElement('a'); a.href = URL.createObjectURL(blob); a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); }
-function buildFullBackupPayload(){ return {app:'MFAM Bills',version:17,exportedAt:new Date().toISOString(),settings,bills,payments}; }
-function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v17_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
+function buildFullBackupPayload(){ return {app:'MFAM Bills',version:18,exportedAt:new Date().toISOString(),settings,bills,payments,advancedBills}; }
+function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v18_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
 function exportBillsBackup(){ exportFullBackup(); }
 function triggerImportBackup(){ triggerUniversalImport(); }
 function triggerUniversalImport(){ document.getElementById('universalImportFile').click(); }
 function importBillsBackup(event){ importUniversalBackup(event); }
-function importUniversalBackup(event){ const file = event.target.files && event.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = e => { try{ const parsed = JSON.parse(e.target.result); if(!parsed || !Array.isArray(parsed.bills)) throw new Error('Invalid'); if(!confirm(`Replace current app data with backup from ${new Date(parsed.exportedAt || Date.now()).toLocaleString()}?\n\nBills: ${(parsed.bills||[]).length}\nPayments: ${Array.isArray(parsed.payments)?parsed.payments.length:0}\n\nYour current data will be exported first as a safety backup.`)) return; exportFullBackup(`mfam_auto_backup_before_restore_${new Date().toISOString().slice(0,10)}.json`); bills = (parsed.bills || []).map(normalizeBill); payments = Array.isArray(parsed.payments) ? parsed.payments.map(normalizePayment) : []; settings = {...defaultSettings, ...(parsed.settings || settings)}; save(); syncSettingsForm(); clearBillForm(); renderAll(); alert(`Backup restored successfully.\nImported from version ${parsed.version || 'legacy'} backup.`); } catch(err){ alert('That file could not be imported.'); } finally { event.target.value=''; } }; reader.readAsText(file); }
+function importUniversalBackup(event){ const file = event.target.files && event.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = e => { try{ const parsed = JSON.parse(e.target.result); if(!parsed || !Array.isArray(parsed.bills)) throw new Error('Invalid'); if(!confirm(`Replace current app data with backup from ${new Date(parsed.exportedAt || Date.now()).toLocaleString()}?\n\nBills: ${(parsed.bills||[]).length}\nPayments: ${Array.isArray(parsed.payments)?parsed.payments.length:0}\n\nYour current data will be exported first as a safety backup.`)) return; exportFullBackup(`mfam_auto_backup_before_restore_${new Date().toISOString().slice(0,10)}.json`); bills = (parsed.bills || []).map(normalizeBill); payments = Array.isArray(parsed.payments) ? parsed.payments.map(normalizePayment) : []; settings = {...defaultSettings, ...(parsed.settings || settings)}; advancedBills = parsed.advancedBills || {}; save(); syncSettingsForm(); clearBillForm(); renderAll(); alert(`Backup restored successfully.\nImported from version ${parsed.version || 'legacy'} backup.`); } catch(err){ alert('That file could not be imported.'); } finally { event.target.value=''; } }; reader.readAsText(file); }
 
 function analyticsBarRows(rows, opts={}){
   if(!rows.length) return '<div class="analytics-empty">No payment data yet for this pay period.</div>';
@@ -761,9 +778,15 @@ if ('serviceWorker' in navigator) {
 const STORAGE_KEY_BILLS = 'mfam_bills_v9';
 const STORAGE_KEY_PAYMENTS = 'mfam_payments_v9';
 const STORAGE_KEY_SETTINGS = 'mfam_settings_v1';
+const STORAGE_KEY_ADVANCE = 'mfam_advance_v1';
 const LEGACY_BILL_KEYS = ['mfam_bills_v8','mfam_bills_v7','mfam_bills_v6','mfam_bills_v5','mfam_bills_v2','mfam_bills'];
 const LEGACY_PAYMENT_KEYS = ['mfam_payments_v8','mfam_payments_v7','mfam_payments_v6','mfam_payments_v5','mfam_payments_v2','mfam_payments'];
 let editingBillId = null;
+let advancedBills = loadJSON(STORAGE_KEY_ADVANCE, {});
+function saveAdvance(){ localStorage.setItem(STORAGE_KEY_ADVANCE, JSON.stringify(advancedBills)); }
+function billAdvanceKey(billId, period){ return `${billId}|${toYMD(period.start)}`; }
+function isAdvancedToNextPeriod(billId, period){ return !!advancedBills[billAdvanceKey(billId, period)]; }
+function toggleAdvanceBill(billId){ const period=getCurrentPayPeriod(); const key=billAdvanceKey(billId, period); if(advancedBills[key]) delete advancedBills[key]; else advancedBills[key]=true; saveAdvance(); renderAll(); }
 
 function uid(prefix='id'){ return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
 function money(n){ return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n||0)); }
@@ -817,7 +840,7 @@ let payments = (loadJSON(STORAGE_KEY_PAYMENTS, []) || []).map(normalizePayment);
 const defaultSettings = { paycheckAmount:2506, nextPayday:'2026-03-14', monthlyDepositAmount:4550, monthlyDepositDay:1 };
 let settings = {...defaultSettings, ...(loadJSON(STORAGE_KEY_SETTINGS, {}) || {})};
 
-function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); }
+function save(){ localStorage.setItem(STORAGE_KEY_BILLS, JSON.stringify(bills)); localStorage.setItem(STORAGE_KEY_PAYMENTS, JSON.stringify(payments)); localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings)); saveAdvance(); }
 function syncSettingsForm(){ document.getElementById('paycheckAmount').value = settings.paycheckAmount ?? ''; document.getElementById('nextPayday').value = settings.nextPayday ?? ''; document.getElementById('monthlyDepositAmount').value = settings.monthlyDepositAmount ?? ''; document.getElementById('monthlyDepositDay').value = settings.monthlyDepositDay ?? ''; }
 function saveSettingsFromForm(){ settings.paycheckAmount = Number(document.getElementById('paycheckAmount').value || 0); settings.nextPayday = document.getElementById('nextPayday').value || defaultSettings.nextPayday; settings.monthlyDepositAmount = Number(document.getElementById('monthlyDepositAmount').value || 0); settings.monthlyDepositDay = Number(document.getElementById('monthlyDepositDay').value || 1); save(); renderAll(); }
 function clearBillForm(){ editingBillId = null; document.getElementById('billName').value=''; document.getElementById('billAmount').value=''; document.getElementById('billDay').value=''; document.getElementById('billSource').value='USAA Bills'; document.getElementById('billSplit').checked=false; document.getElementById('billSubmitBtn').textContent='Add Bill'; }
@@ -906,11 +929,23 @@ function splitHistorySummary(bill){
   return {count:splitPayments.length, cycleCount:uniqueCycles.size, text:`${splitPayments.length} installments logged across ${uniqueCycles.size} due cycle${uniqueCycles.size===1?'':'s'} • ${latestText}`};
 }
 function billsForPeriod(period){
+  const current = getCurrentPayPeriod();
+  const isCurrent = toYMD(period.start)===toYMD(current.start);
+  const isNext = toYMD(period.start)===toYMD(getPeriodForOffset(1).start);
   return bills.filter(b=>!b.paidOff).map(b=>{
-    const allocated = amountDueThisCycle(b, period);
+    let allocated = amountDueThisCycle(b, period);
+    const advancedNow = isCurrent && isAdvancedToNextPeriod(b.id, current);
+    const advancedIntoThis = isNext && isAdvancedToNextPeriod(b.id, current);
+    if(advancedNow) return null;
+    if(advancedIntoThis && allocated<=0){
+      allocated = amountDueThisCycle(b, current);
+      if(allocated<=0) return null;
+      const paidThisCycle = paymentInPeriodForBill(b.id, period);
+      return {...b, allocated, paidThisCycle, due: displayDueDate(b, current), advancedFromPrior:true};
+    }
     if(allocated <= 0) return null;
     const paidThisCycle = paymentInPeriodForBill(b.id, period);
-    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period)};
+    return {...b, allocated, paidThisCycle, due: displayDueDate(b, period), advancedFromPrior:advancedIntoThis};
   }).filter(Boolean).sort((a,b)=>a.due-b.due || a.name.localeCompare(b.name));
 }
 function incomeForPeriod(period){
@@ -1120,7 +1155,7 @@ function renderDashboard(){
   const pct = list.length ? Math.min(100, (paidCount / list.length) * 100) : 0; document.getElementById('progressBar').style.width = pct + '%'; document.getElementById('progressNote').textContent = `${paidCount} of ${list.length} due bills paid this cycle. Total due this cycle: ${money(dueTotal)}.`;
   const ring = document.getElementById('progressRing'); ring.style.background = `conic-gradient(var(--accent) 0deg, var(--accent-2) ${pct*3.6}deg, #10203b ${pct*3.6}deg, #10203b 360deg)`; document.getElementById('ringText').textContent = `${Math.round(pct)}%`;
   if(!list.length){ box.innerHTML = '<div class="empty">No active bills due in this pay period yet.</div>'; return; }
-  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button>`}</div></div></div>`; });
+  list.forEach(b => { const payment = paymentForBillInPeriod(b.id, period); const shownAmount = payment ? payment.amount : b.allocated; const splitBadge = b.split ? `<span class="badge">${esc((payment && payment.splitMeta && payment.splitMeta.label) || splitProgressLabel(b, period))}</span>` : ''; const splitSummary = b.split ? splitHistorySummary(b) : null; box.innerHTML += `<div class="bill-card ${payment ? 'paidcycle' : ''}"><div><div class="name">${esc(b.name)}</div><div class="meta">Due ${b.due.toLocaleDateString()}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="badge ${sourceClass(payment ? payment.source : b.source)}">${esc(payment ? payment.source : b.source)}</span>${splitBadge}${payment ? '<span class="badge good">✓ Paid</span>' : ''}</div></div><div><div class="amount">${money(shownAmount)}</div><div class="meta" style="text-align:right">${payment ? 'Actual payment' : 'Projected payment'}</div><div class="btnrow">${payment ? `<button class="btn btn-ghost" onclick="showTab('history', document.querySelectorAll('.navbtn')[3])">View Payment</button>` : `<button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(b.allocated)})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">Next Pay Period</button>`}</div></div></div>`; });
 }
 function renderBills(){
   const term = (document.getElementById('billSearch').value || '').trim().toLowerCase();
@@ -1133,7 +1168,7 @@ function renderBills(){
     const allocated = amountDueThisCycle(b, period);
     const paidThisCycle = paymentInPeriodForBill(b.id, period);
     const splitSummary = b.split ? splitHistorySummary(b) : null;
-    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
+    box.innerHTML += `<div class="list-card ${b.paidOff ? 'paidoff' : ''}"><div class="row"><div><div class="title">${esc(b.name)}</div><div class="detail">Due day ${b.day} • ${esc(b.source)}${splitProgressDetail(b, period)}${splitSummary ? ` • ${esc(splitSummary.text)}` : ''}</div><div class="badges"><span class="status-pill"><span class="dot ${b.paidOff ? 'off' : ''}"></span>${b.paidOff ? 'Paid Off' : 'Active'}</span>${allocated>0 ? `<span class="badge ${sourceClass(b.source)}">Current cycle ${money(allocated)}</span>` : ''}${paidThisCycle ? '<span class="badge good">Paid this cycle</span>' : ''}</div></div><div class="amount">${money(b.amount)}</div></div><div class="btnrow"><button class="btn ${b.paidOff ? 'btn-success' : 'btn-ghost'}" onclick="togglePaidOff('${esc(b.id)}')">${b.paidOff ? 'Set Active' : 'Mark Paid Off'}</button><button class="btn btn-secondary" onclick="editBill('${esc(b.id)}')">Edit</button><button class="btn btn-primary" onclick="logPayment('${esc(b.id)}', ${Number(allocated || (b.split ? b.amount/2 : b.amount))})">Pay</button><button class="btn btn-secondary" onclick="toggleAdvanceBill('${esc(b.id)}')">${isAdvancedToNextPeriod(b.id, period) ? 'Undo Next Pay Period' : 'Next Pay Period'}</button><button class="btn btn-danger" onclick="deleteBill('${esc(b.id)}')">Delete</button></div></div>`;
   });
 }
 function renderHistory(){
@@ -1146,13 +1181,13 @@ function renderHistory(){
 }
 function exportCSV(){ let csv='Date,Bill,Amount,Source\n'; payments.forEach(p => csv += `${new Date(p.paidAt).toLocaleDateString()},${p.bill},${p.amount},${p.source}\n`); downloadBlob(new Blob([csv],{type:'text/csv'}), 'mfam_payments.csv'); }
 function downloadBlob(blob, filename){ const a=document.createElement('a'); a.href = URL.createObjectURL(blob); a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); }
-function buildFullBackupPayload(){ return {app:'MFAM Bills',version:17,exportedAt:new Date().toISOString(),settings,bills,payments}; }
-function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v17_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
+function buildFullBackupPayload(){ return {app:'MFAM Bills',version:18,exportedAt:new Date().toISOString(),settings,bills,payments,advancedBills}; }
+function exportFullBackup(filename){ const stamp = new Date().toISOString().slice(0,10); const name = filename || `mfam_bills_full_backup_v18_${stamp}.json`; downloadBlob(new Blob([JSON.stringify(buildFullBackupPayload(),null,2)],{type:'application/json'}), name); }
 function exportBillsBackup(){ exportFullBackup(); }
 function triggerImportBackup(){ triggerUniversalImport(); }
 function triggerUniversalImport(){ document.getElementById('universalImportFile').click(); }
 function importBillsBackup(event){ importUniversalBackup(event); }
-function importUniversalBackup(event){ const file = event.target.files && event.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = e => { try{ const parsed = JSON.parse(e.target.result); if(!parsed || !Array.isArray(parsed.bills)) throw new Error('Invalid'); if(!confirm(`Replace current app data with backup from ${new Date(parsed.exportedAt || Date.now()).toLocaleString()}?\n\nBills: ${(parsed.bills||[]).length}\nPayments: ${Array.isArray(parsed.payments)?parsed.payments.length:0}\n\nYour current data will be exported first as a safety backup.`)) return; exportFullBackup(`mfam_auto_backup_before_restore_${new Date().toISOString().slice(0,10)}.json`); bills = (parsed.bills || []).map(normalizeBill); payments = Array.isArray(parsed.payments) ? parsed.payments.map(normalizePayment) : []; settings = {...defaultSettings, ...(parsed.settings || settings)}; save(); syncSettingsForm(); clearBillForm(); renderAll(); alert(`Backup restored successfully.\nImported from version ${parsed.version || 'legacy'} backup.`); } catch(err){ alert('That file could not be imported.'); } finally { event.target.value=''; } }; reader.readAsText(file); }
+function importUniversalBackup(event){ const file = event.target.files && event.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = e => { try{ const parsed = JSON.parse(e.target.result); if(!parsed || !Array.isArray(parsed.bills)) throw new Error('Invalid'); if(!confirm(`Replace current app data with backup from ${new Date(parsed.exportedAt || Date.now()).toLocaleString()}?\n\nBills: ${(parsed.bills||[]).length}\nPayments: ${Array.isArray(parsed.payments)?parsed.payments.length:0}\n\nYour current data will be exported first as a safety backup.`)) return; exportFullBackup(`mfam_auto_backup_before_restore_${new Date().toISOString().slice(0,10)}.json`); bills = (parsed.bills || []).map(normalizeBill); payments = Array.isArray(parsed.payments) ? parsed.payments.map(normalizePayment) : []; settings = {...defaultSettings, ...(parsed.settings || settings)}; advancedBills = parsed.advancedBills || {}; save(); syncSettingsForm(); clearBillForm(); renderAll(); alert(`Backup restored successfully.\nImported from version ${parsed.version || 'legacy'} backup.`); } catch(err){ alert('That file could not be imported.'); } finally { event.target.value=''; } }; reader.readAsText(file); }
 
 function analyticsBarRows(rows, opts={}){
   if(!rows.length) return '<div class="analytics-empty">No payment data yet for this pay period.</div>';
